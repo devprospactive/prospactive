@@ -1,0 +1,149 @@
+name: Temporary Plumbing Site References
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-references:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Generate screenshot reference packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p work "Plumbing Site References"
+
+          cat > work/sites.tsv <<'EOF'
+          01-i7-plumbing	https://i7-plumbing.framer.website/
+          02-plumbing-contractor	https://plumbing-template.framer.website/home-1
+          03-plumby	https://plumby.framer.website/
+          04-fixplumb	https://fixplumb.framer.website/
+          05-plubar	https://plubar.framer.website/
+          06-swiftrooter	https://swiftrooter.framer.website/
+          07-plumbo	https://plumbo.framer.website/
+          08-tradesman	https://tradesman-template.framer.website/
+          09-quickfix	https://quickfix.framer.website/
+          10-plumbly	https://plumbly.framer.website/
+          EOF
+
+          while IFS=$'\t' read -r package_name site_url; do
+            echo "Capturing ${package_name}: ${site_url}"
+            payload=$(python3 - "$site_url" <<'PY'
+          import json, sys
+          print(json.dumps({
+              "pages": [sys.argv[1]],
+              "mode": "sections",
+              "includeStylesReference": True,
+              "deviceScaleFactor": 2,
+              "jpegQuality": 100,
+          }))
+          PY
+          )
+
+            archive="work/${package_name}.zip"
+            extract_dir="work/${package_name}-extract"
+            mkdir -p "$extract_dir"
+
+            curl --fail-with-body --silent --show-error \
+              --retry 3 --retry-delay 5 --retry-all-errors \
+              --connect-timeout 30 --max-time 300 \
+              -H 'Content-Type: application/json' \
+              --data "$payload" \
+              'https://screenshot.prospactive.app/api/screenshots/export' \
+              -o "$archive"
+
+            unzip -t "$archive" >/dev/null
+            unzip -q "$archive" -d "$extract_dir"
+
+            root_dir=$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+            if [ -z "$root_dir" ]; then
+              echo "No exported site folder found for ${package_name}" >&2
+              exit 1
+            fi
+
+            package_dir="Plumbing Site References/${package_name}"
+            mkdir -p "$package_dir"
+            cp -a "$root_dir"/. "$package_dir"/
+
+            reference_file=$(find "$package_dir" -maxdepth 2 -type f \( -iname '*reference*.md' -o -iname '*.md' \) | head -n 1)
+            if [ -z "$reference_file" ]; then
+              echo "Reference Markdown file missing for ${package_name}" >&2
+              exit 1
+            fi
+
+            python3 - "$reference_file" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8", errors="replace")
+
+          # Remove platform-specific source URLs and terminology while retaining
+          # measured visual values, selectors, spacing, typography, and colors.
+          text = re.sub(r'https?://[^\s)>\]"\']+', lambda m: '[source omitted]' if re.search(r'framer', m.group(0), re.I) else m.group(0), text)
+          text = re.sub(r'(?i)framerusercontent\.com', 'source-domain-omitted', text)
+          text = re.sub(r'(?i)framer\.website', 'reference-domain-omitted', text)
+          text = re.sub(r'(?i)\bframer\b', 'original site builder', text)
+          text = re.sub(r'(?i)framer', 'site-builder', text)
+
+          header = "# Design Reference\n\nUse this document only as a visual and structural design reference. Recreate the design independently without copying platform-specific runtime code or branding.\n\n"
+          if not text.lstrip().startswith('# Design Reference'):
+              text = header + text.lstrip()
+
+          path.write_text(text, encoding="utf-8")
+          if re.search(r'framer', text, re.I):
+              raise SystemExit(f"Platform reference still present in {path}")
+          PY
+
+            image_count=$(find "$package_dir" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) | wc -l | tr -d ' ')
+            if [ "$image_count" -lt 1 ]; then
+              echo "No section images found for ${package_name}" >&2
+              exit 1
+            fi
+
+            echo "Completed ${package_name} with ${image_count} section images"
+          done < work/sites.tsv
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('Plumbing Site References')
+          packages = sorted(p for p in root.iterdir() if p.is_dir())
+          if len(packages) != 10:
+              raise SystemExit(f'Expected 10 packages, found {len(packages)}')
+
+          for package in packages:
+              images = list(package.rglob('*.jpg')) + list(package.rglob('*.jpeg')) + list(package.rglob('*.png'))
+              refs = list(package.rglob('*.md'))
+              if not images:
+                  raise SystemExit(f'No images in {package}')
+              if not refs:
+                  raise SystemExit(f'No Markdown reference in {package}')
+              for ref in refs:
+                  text = ref.read_text(encoding='utf-8', errors='replace')
+                  if re.search(r'framer', text, re.I):
+                      raise SystemExit(f'Platform reference remains in {ref}')
+          PY
+
+          zip -qr "Plumbing Site References.zip" "Plumbing Site References"
+          unzip -t "Plumbing Site References.zip" >/dev/null
+
+      - name: Upload completed reference collection
+        uses: actions/upload-artifact@v4
+        with:
+          name: plumbing-site-references
+          path: Plumbing Site References.zip
+          if-no-files-found: error
+          retention-days: 1
